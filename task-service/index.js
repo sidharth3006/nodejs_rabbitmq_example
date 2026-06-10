@@ -3,6 +3,7 @@ global.crypto = crypto;
 const express = require('express');
 const bodyParser = require('body-parser');
 const mongoose = require('mongoose');
+const amqp = require('amqplib');
 
 const app = express();
 const port = 3002;
@@ -23,6 +24,30 @@ const TaskSchema = new mongoose.Schema({
 
 const Task = mongoose.model('Task', TaskSchema); 
 
+let channel, connection;
+
+async function connectRabbitMQWithRetry(retries = 5, delay = 3000){
+
+    while(retries){
+        try{
+           connection = await amqp.connect("amqp://rabbitmq"); 
+           channel = await connection.createChannel();
+           await channel.assertQueue('task_created');
+           console.log("Connected to RabbitMQ");
+           break;
+        } 
+        catch(error){
+           console.log("Error connecting to RabbitMQ: ",error);
+           retries--;
+           if(retries === 0){
+              console.log("Failed to connect to RabbitMQ");
+              process.exit(1);
+           }
+           await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
 
 
 app.post('/tasks', async (req, res) => { 
@@ -32,6 +57,17 @@ app.post('/tasks', async (req, res) => {
     try{ 
     const task = new Task({ title, description, userId });
     await task.save(); 
+    
+    const message = {taskId: task._id, userId, title }; 
+
+    if (!channel){
+        return res.status(503).json({
+            error: "RabbitMQ not connected"
+        })
+    } 
+
+    channel.sendToQueue("task_created", Buffer.from(JSON.stringify(message)));
+
     res.status(201).send(task);
     } catch (error) { 
         console.log(error);
@@ -50,4 +86,5 @@ app.get('/', (req, res) => {
 
 app.listen(port, () => {
   console.log(`Task Service listening on port ${port}`);
+  connectRabbitMQWithRetry();
 });
